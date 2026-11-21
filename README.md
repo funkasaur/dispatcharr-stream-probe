@@ -1,4 +1,14 @@
-# Stream Probe for Dispatcharr
+<h1 align="center">Stream Probe for Dispatcharr</h1>
+
+<p align="center">Measure playback through the Dispatcharr proxy.</p>
+
+<p align="center">
+  <a href="LICENSE"><img alt="License" src="https://img.shields.io/github/license/funkasaur/dispatcharr-stream-probe"></a>
+  <a href="https://github.com/funkasaur/dispatcharr-stream-probe/commits/"><img alt="Last commit" src="https://img.shields.io/github/last-commit/funkasaur/dispatcharr-stream-probe"></a>
+  <a href="https://github.com/funkasaur/dispatcharr-stream-probe/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/funkasaur/dispatcharr-stream-probe"></a>
+</p>
+
+## Overview
 
 A [Dispatcharr](https://github.com/Dispatcharr/Dispatcharr) plugin that checks your live channels the way a viewer
 would: it plays each channel for a few seconds through Dispatcharr's own proxy, runs `ffprobe` on what came back,
@@ -11,6 +21,20 @@ off a one-connection account. Stream Probe goes through the proxy as a normal (d
 account's connection limit and M3U profile applies: a busy account is skipped, never kicked.
 
 Nothing is renamed, moved or deleted. The plugin only reads channels and writes `stream_stats`.
+
+## Features
+
+- Runs ffprobe on the stream served by Dispatcharr.
+- Records stream statistics and reports channels that return no video.
+
+## Repository structure
+
+```text
+dispatcharr-stream-probe/
+├── stream_probe/  # Plugin source, manifest and logo
+├── build.py       # Versioned plugin ZIP builder
+└── tests/         # Offline unit tests
+```
 
 ## How it differs from IPTV Checker and VOD Probe
 
