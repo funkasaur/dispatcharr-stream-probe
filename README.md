@@ -12,6 +12,26 @@ account's connection limit and M3U profile applies: a busy account is skipped, n
 
 Nothing is renamed, moved or deleted. The plugin only reads channels and writes `stream_stats`.
 
+## How it differs from IPTV Checker and VOD Probe
+
+Two plugins in the registry already use `ffprobe` on streams. Stream Probe does a different job from both:
+
+| | **Stream Probe** | **IPTV Checker** | **VOD Probe** |
+|---|---|---|---|
+| What it checks | Live channels | Live channels | VOD (movies and episodes) |
+| How it connects | Through Dispatcharr's own proxy, as a dedicated user | Opens the provider stream URLs directly | Probes VOD relations |
+| Connection limits | Counts like any viewer: each M3U profile's limit applies, it skips a channel when the provider login has too few free connections, and accounts sharing one login are counted together | Outside Dispatcharr's connection counting | n/a (VOD) |
+| What it writes | Resolution, codec, fps, audio and bitrate into the stream's `stream_stats` (the fields the UI shows) | Its own results, then renames, moves, restores or deletes channels by result | Quality into each VOD relation's `custom_properties` |
+| Changes to your lineup | None. It only reports | Yes, by design | None |
+| Schedule | Nightly window with a per-night cap; rechecks each channel every N days | — | Background task |
+| Alerts | Only newly dead channels; groups can be "probe but don't alert" | — | — |
+
+**Why it is useful:**
+- **Safe on 1-connection providers.** A checker that opens provider URLs directly can take the only connection a viewer needs, or get an account flagged for too many connections. Stream Probe asks Dispatcharr for the stream like any client, so the provider never sees more connections than your limits allow. It also waits instead of competing when a line is busy.
+- **Fills the empty stream stats.** With the default Proxy stream profile, `stream_stats` stays empty, so the UI shows no resolution or codec. Stream Probe fills those fields for every channel from a real playback sample.
+- **Finds dead channels before viewers do,** with an alert that lists only what newly broke, not the same list every night.
+- **Reports, never edits.** It complements IPTV Checker rather than replacing it: use IPTV Checker when you want automatic cleanup, and Stream Probe when you want quality data and dead-channel alerts without touching connections or the lineup.
+
 ## How a run works
 
 - One channel at a time, in a nightly window (or on demand). Never-checked channels go first, then channels that
