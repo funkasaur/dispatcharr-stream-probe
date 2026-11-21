@@ -3,8 +3,10 @@ import datetime
 import importlib.util
 import pathlib
 import sys
+import tempfile
 import types
 import unittest
+from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 celery = types.ModuleType("celery")
@@ -107,13 +109,109 @@ class StreamProbeLogic(unittest.TestCase):
 
     def test_manifest_v2(self):
         p = sp.Plugin
-        self.assertEqual((p.manifest_version, p.version), (2, "1.2.0"))
+        self.assertEqual((p.manifest_version, p.version), (2, "1.2.1"))
         self.assertTrue({"background_tasks", "subprocess", "outbound_network", "proxy_internals"} <= set(p.capabilities))
         self.assertIn("proxy_base", [f["id"] for f in p.fields])
 
     def test_quality(self):
         self.assertEqual([sp.quality_label({"resolution": r}) for r in ("3840x2160", "1920x1080", "1280x720", "720x480", "")],
                          ["UHD", "FHD", "HD", "SD", "unknown"])
+
+
+class PluginStorage(unittest.TestCase):
+    def setUp(self):
+        self.root = pathlib.Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.legacy = self.root / "legacy"
+        self.data_dir = self.root / "plugin-data"
+        self.enterContext(mock.patch.object(sp, "LEGACY_DATA_DIR", self.legacy))
+        self.enterContext(mock.patch.object(sp, "_context_data_dir", str(self.data_dir)))
+
+    def test_run_uses_and_records_context_data_dir(self):
+        sp._context_data_dir = str(self.root / "other")
+        self.data_dir.mkdir()
+        (self.data_dir / "state.json").write_text('{"channels": {"1": {"result": "ok"}}}')
+        result = sp.Plugin().run("report", {}, {"data_dir": str(self.data_dir)})
+        self.assertIn("1 channels", result["message"])
+        self.assertEqual(sp._data_dir(), str(self.data_dir))
+        self.assertEqual(sp.Plugin.version, "1.2.1")
+        self.assertNotIn("filesystem_write", sp.Plugin.capabilities)
+
+    def test_scheduled_path_uses_plugin_manager(self):
+        sp._context_data_dir = None
+        loader = types.ModuleType("apps.plugins.loader")
+        loader.PluginManager = mock.Mock()
+        manager = loader.PluginManager.get.return_value
+        manager.get_plugin.return_value = types.SimpleNamespace(data_dir=str(self.data_dir))
+        with mock.patch.dict(sys.modules, {"apps.plugins.loader": loader}), \
+             mock.patch.object(sp, "_settings_from_db", return_value=({}, True)):
+            with mock.patch.object(sp, "_redis"):
+                self.assertEqual(sp.run_window(), "probe user / XC password not set")
+        manager.get_plugin.assert_called_once_with(sp.PLUGIN_KEY)
+        self.assertTrue((self.data_dir / "state.json").is_file())
+
+    def test_fallback_uses_plugin_key_or_managed_slug(self):
+        sp._context_data_dir = None
+        loader = types.ModuleType("apps.plugins.loader")
+        loader.PluginManager = mock.Mock()
+        loader.PluginManager.get.side_effect = RuntimeError("registry unavailable")
+        models = types.ModuleType("apps.plugins.models")
+        models.PluginConfig = mock.Mock()
+        first = models.PluginConfig.objects.filter.return_value.first
+        first.side_effect = [None, types.SimpleNamespace(slug="stream-probe")]
+        with mock.patch.dict(sys.modules, {"apps.plugins.loader": loader, "apps.plugins.models": models}), \
+             mock.patch.object(sp, "__file__", str(self.root / sp.PLUGIN_KEY / "plugin.py")), \
+             self.assertLogs(sp.LOGGER, level="WARNING") as logs:
+            self.assertEqual(sp._data_dir(), str(self.root / "_data" / sp.PLUGIN_KEY))
+            self.assertEqual(sp._data_dir(), str(self.root / "_data" / "stream-probe"))
+        self.assertIn("Using fallback plugin storage", "\n".join(logs.output))
+
+    def test_migration_copies_once_and_leaves_legacy_state(self):
+        self.legacy.mkdir()
+        legacy = self.legacy / "state.json"
+        legacy.write_text('{"saved": true}')
+        with self.assertLogs(sp.LOGGER, level="INFO") as logs:
+            sp._data_dir()
+        dest = self.data_dir / "state.json"
+        self.assertEqual(dest.read_text(), '{"saved": true}')
+        self.assertIn("state.json", logs.output[0])
+        self.assertEqual(legacy.read_text(), '{"saved": true}')
+        dest.unlink()
+        sp._data_dir()
+        self.assertFalse(dest.exists())
+
+    def test_migration_skips_existing_state(self):
+        self.legacy.mkdir()
+        (self.legacy / "state.json").write_text('{"legacy": true}')
+        self.data_dir.mkdir()
+        dest = self.data_dir / "state.json"
+        dest.write_text('{"current": true}')
+
+        sp._data_dir()
+
+        self.assertEqual(dest.read_text(), '{"current": true}')
+
+    def test_missing_legacy_directory_is_ok(self):
+        self.assertEqual(sp._data_dir(), str(self.data_dir))
+        self.assertEqual(list(self.data_dir.iterdir()), [])
+
+    def test_ffprobe_sample_uses_plugin_storage_and_is_removed_on_error(self):
+        chunk = (bytes([0x47, 0x01, 0, 0]) + bytes(184)) * 50
+        response = mock.MagicMock()
+        response.__enter__.return_value.read1.side_effect = [chunk, b""]
+
+        def ffprobe(path):
+            sample = pathlib.Path(path)
+            self.assertEqual(sample.parent, self.data_dir)
+            self.assertEqual(sample.read_bytes(), chunk)
+            raise RuntimeError("test ffprobe error")
+
+        with mock.patch.object(sp.urllib.request, "urlopen", return_value=response), \
+             mock.patch.object(sp, "_channel_meta", return_value={}), \
+             mock.patch.object(sp, "_ffprobe", side_effect=ffprobe):
+            result = sp.probe_channel({"xc_username": "user", "xc_password": "pass"}, (1, 1, "A", "", "uuid", 1))
+        self.assertEqual(result["result"], "no_video")
+        self.assertIn("test ffprobe error", result["note"])
+        self.assertEqual(list(self.data_dir.iterdir()), [])
 
 
 if __name__ == "__main__":

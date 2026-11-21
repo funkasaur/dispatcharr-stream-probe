@@ -18,6 +18,7 @@ it) share its connections. keep_free counts the free connections of the whole lo
 profile's search/replace to one of the account's stream URLs and comparing the username/password in the result.
 """
 import datetime
+import fcntl
 import json
 import logging
 import os
@@ -37,8 +38,8 @@ from celery import shared_task
 
 PLUGIN_KEY = "stream_probe"
 TASK_NAME = "stream_probe.run_window"
-DATA_DIR = "/data/plugin_data/stream_probe"
-STATE = os.path.join(DATA_DIR, "state.json")
+LEGACY_DATA_DIR = os.path.join("/data/plugin_data", PLUGIN_KEY)
+_context_data_dir = None
 LOCK_KEY = "stream_probe:lock"
 STOP_KEY = "stream_probe:stop"
 DEFAULT_PROXY_BASE = "http://127.0.0.1:9191"
@@ -111,6 +112,73 @@ ACTIONS = [
 
 def _now():
     return datetime.datetime.now(datetime.timezone.utc)
+
+
+def _migrate_state(data_dir):
+    pending = os.path.join(data_dir, ".legacy-migration")
+    complete = os.path.join(data_dir, ".legacy-migrated")
+    if os.path.exists(complete):
+        return
+
+    os.makedirs(data_dir, exist_ok=True)
+    # Actions and scheduled checks may start in different processes.
+    dir_fd = os.open(data_dir, os.O_RDONLY)
+    try:
+        fcntl.flock(dir_fd, fcntl.LOCK_EX)
+        if os.path.exists(complete):
+            return
+        interrupted = os.path.exists(pending)
+        if not interrupted and any(name.endswith(".json") for name in os.listdir(data_dir)):
+            return
+        try:
+            names = sorted(name for name in os.listdir(LEGACY_DATA_DIR) if name.endswith(".json"))
+        except FileNotFoundError:
+            if interrupted:
+                raise
+            return
+        if not names:
+            return
+        if not interrupted:
+            with open(pending, "x", encoding="utf-8"):
+                pass
+        # Resume interrupted copies without replacing anything already published.
+        tmp = pending + ".tmp"
+        for name in names:
+            dest = os.path.join(data_dir, name)
+            if not os.path.exists(dest):
+                with open(os.path.join(LEGACY_DATA_DIR, name), "rb") as src, open(tmp, "wb") as dst:
+                    shutil.copyfileobj(src, dst)
+                os.replace(tmp, dest)
+                LOGGER.info("Migrated legacy plugin state: %s", dest)
+        os.replace(pending, complete)
+    finally:
+        os.close(dir_fd)
+
+
+def _data_dir():
+    data_dir = _context_data_dir
+    if not data_dir:
+        try:
+            from apps.plugins.loader import PluginManager
+            plugin = PluginManager.get().get_plugin(PLUGIN_KEY)
+            data_dir = plugin.data_dir if plugin else None
+        except Exception:
+            LOGGER.warning("Could not look up Dispatcharr plugin storage", exc_info=True)
+        if not data_dir:
+            # Managed installs keep the registry slug in the config even before discovery.
+            storage_key = PLUGIN_KEY
+            try:
+                from apps.plugins.models import PluginConfig
+                cfg = PluginConfig.objects.filter(key=PLUGIN_KEY).first()
+                if cfg and cfg.slug not in ("", ".", "..") and os.path.basename(cfg.slug) == cfg.slug:
+                    storage_key = cfg.slug
+            except Exception:
+                LOGGER.debug("Could not load plugin storage slug", exc_info=True)
+            plugins_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            data_dir = os.path.join(plugins_dir, "_data", storage_key)
+            LOGGER.warning("Using fallback plugin storage: %s", data_dir)
+    _migrate_state(data_dir)
+    return data_dir
 
 
 def _load_json(path, default):
@@ -430,7 +498,7 @@ def _ffprobe(path):
     return json.loads(res.stdout or "{}")
 
 
-def probe_channel(settings, ch):
+def probe_channel(settings, ch, data_dir=None):
     """Play one channel through the proxy; return a result record (never raises)."""
     cid, num, name, group, uuid, first_stream = ch
     rec = {"at": _now().isoformat(), "name": name, "number": num, "group": group}
@@ -478,13 +546,12 @@ def probe_channel(settings, ch):
     elapsed = max(0.5, time.time() - first_real)
     kbps = real * 8 / 1000 / elapsed
     try:
-        with tempfile.NamedTemporaryFile(suffix=".ts", delete=False) as fh:
+        data_dir = data_dir or _data_dir()
+        os.makedirs(data_dir, exist_ok=True)
+        with tempfile.NamedTemporaryFile(suffix=".ts", dir=data_dir) as fh:
             fh.write(buf)
-            path = fh.name
-        try:
-            info = _ffprobe(path)
-        finally:
-            os.unlink(path)
+            fh.flush()
+            info = _ffprobe(fh.name)
     except Exception as e:
         info = {}
         rec["note"] = f"ffprobe failed: {str(e)[:120]}"
@@ -511,15 +578,17 @@ def _do_run(settings, trigger, limit=None, group=None, channel_ids=None):
     window = float(settings.get("window_minutes") or 150) * 60
     if not r.set(LOCK_KEY, trigger, nx=True, ex=int(window + 3600)):
         return "already running"
-    r.delete(STOP_KEY)
-    st = _load_json(STATE, {})
-    results = st.setdefault("channels", {})
-    run = {"trigger": trigger, "started": _now().isoformat(), "done": 0, "counts": {}, "finished": None}
-    st["run"] = run
     try:
+        r.delete(STOP_KEY)
+        data_dir = _data_dir()
+        state_path = os.path.join(data_dir, "state.json")
+        st = _load_json(state_path, {})
+        results = st.setdefault("channels", {})
+        run = {"trigger": trigger, "started": _now().isoformat(), "done": 0, "counts": {}, "finished": None}
+        st["run"] = run
         if not settings.get("xc_username") or not settings.get("xc_password"):
             run["finished"], run["error"] = _now().isoformat(), "probe user / XC password not set"
-            _save_json(STATE, st)
+            _save_json(state_path, st)
             return run["error"]
         chans = _channels(dict(settings, include_groups=group) if group else settings)
         if channel_ids:
@@ -534,7 +603,7 @@ def _do_run(settings, trigger, limit=None, group=None, channel_ids=None):
             profiles = []
         todo = pick_channels(chans, results, _now(), settings.get("recheck_days"), limit or settings.get("max_channels") or 150)
         run["planned"] = len(todo)
-        _save_json(STATE, st)
+        _save_json(state_path, st)
         deadline = time.time() + window
         for ch in todo:
             if r.get(STOP_KEY) or time.time() > deadline:
@@ -546,20 +615,20 @@ def _do_run(settings, trigger, limit=None, group=None, channel_ids=None):
                 rec = {"at": _now().isoformat(), "name": ch[2], "number": ch[1], "group": ch[3], "result": "busy",
                        "note": f"{free} connection(s) free, kept for viewers"}
             else:
-                rec = probe_channel(settings, ch)
+                rec = probe_channel(settings, ch, data_dir)
             rec.update(dead_streak(previous.get(str(ch[0])), rec["result"], rec["at"]))
             results[str(ch[0])] = rec
             run["done"] += 1
             run["counts"][rec["result"]] = run["counts"].get(rec["result"], 0) + 1
             run["current"] = f"{ch[1]} {ch[2]}"
-            _save_json(STATE, st)
+            _save_json(state_path, st)
             _wait_released(ch[4])
             time.sleep(float(settings.get("pause_seconds") or 3))
         run["finished"] = _now().isoformat()
         run.pop("current", None)
         st.setdefault("history", []).insert(0, dict(run))
         st["history"] = st["history"][:20]
-        _save_json(STATE, st)
+        _save_json(state_path, st)
         dead = [(k, v) for k, v in results.items() if v.get("result") == "dead" and v.get("at", "") >= run["started"]]
         new, old = alert_lines(dead, previous, set(_names(settings.get("alert_exclude_groups"))))
         run["newly_dead"] = len(new)
@@ -605,7 +674,7 @@ def _ensure_schedule(settings):
 
 
 def _report():
-    st = _load_json(STATE, {})
+    st = _load_json(os.path.join(_data_dir(), "state.json"), {})
     chans = st.get("channels") or {}
     if not chans:
         return {"status": "ok", "message": "Nothing probed yet."}
@@ -629,7 +698,7 @@ def _report():
 
 
 def _dead_list():
-    st = _load_json(STATE, {})
+    st = _load_json(os.path.join(_data_dir(), "state.json"), {})
     rows = [{"channel_id": int(k), "number": v.get("number"), "name": v.get("name"), "group": v.get("group"),
              "result": v.get("result"), "at": v.get("at"), "dead_count": v.get("dead_count", 1),
              "dead_since": v.get("dead_since") or v.get("at"), "note": (v.get("note") or "")[:120]}
@@ -639,7 +708,7 @@ def _dead_list():
 
 
 def _status():
-    st = _load_json(STATE, {})
+    st = _load_json(os.path.join(_data_dir(), "state.json"), {})
     run = st.get("run") or {}
     try:
         from django_celery_beat.models import PeriodicTask
@@ -668,7 +737,7 @@ def _status():
 
 class Plugin:
     name = "Stream Probe"
-    version = "1.2.0"
+    version = "1.2.1"
     description = ("Plays each channel for a few seconds through Dispatcharr's own proxy, one at a time, and records "
                    "resolution, codec, frame rate and bitrate on the stream that served it. Connection limits are "
                    "respected, so a busy account is skipped, never kicked. Report-only.")
@@ -680,13 +749,14 @@ class Plugin:
     min_dispatcharr_version = "v0.34.0"
     # background_tasks: the run is a Celery task (nightly via beat); proxy_internals: channel metadata and connection
     # counts in Redis, writes stream_stats through the proxy's ChannelService; subprocess: ffprobe; outbound_network:
-    # the probe's own HTTP request to the local proxy plus optional Telegram/SMTP alerts; filesystem_write: state file
-    # under /data/plugin_data/stream_probe.
-    capabilities = ["background_tasks", "proxy_internals", "subprocess", "outbound_network", "filesystem_write"]
+    # the probe's own HTTP request to the local proxy plus optional Telegram/SMTP alerts.
+    capabilities = ["background_tasks", "proxy_internals", "subprocess", "outbound_network"]
     fields = FIELDS
     actions = ACTIONS
 
     def run(self, action, params, context):
+        global _context_data_dir
+        _context_data_dir = context.get("data_dir") or _context_data_dir
         settings = context.get("settings", {})
         params = params or {}
         if action == "probe_now":

@@ -105,7 +105,6 @@ container uses a different address or port for uWSGI, change *Dispatcharr addres
 | Use live proxy internals | Reads channel metadata and per-profile connection counts in Redis to see which stream served the channel and how many connections are free; saves stats through the proxy's own stream-stats update. |
 | Run host processes | Runs `ffprobe` on the sampled bytes. |
 | Access external network services | The probe's own HTTP request to the local proxy, plus the optional Telegram/email alerts. Nothing else is contacted; there is no telemetry. |
-| Write outside plugin storage | Keeps its state file in `/data/plugin_data/stream_probe`. |
 
 ## Settings
 
@@ -146,7 +145,11 @@ check are counted ("still dead: N"), not listed again.
 - A single sample can catch a short outage. Failed channels are retried first on the next run.
 - The plugin uses Dispatcharr internals (Redis key names, the proxy's stream-stats update). A Dispatcharr update can
   change them; check **Status** and **Report** after updating.
-- State lives in `/data/plugin_data/stream_probe/state.json`.
+
+State and temporary ffprobe samples live in Dispatcharr's plugin data directory. The default paths are
+`/data/plugins/_data/stream-probe/` for a registry install or `/data/plugins/_data/stream_probe/` for a ZIP import.
+On first use of an empty state directory, the plugin copies saved state once from
+`/data/plugin_data/stream_probe/` if present.
 
 ## Development
 
