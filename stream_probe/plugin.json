@@ -1,0 +1,241 @@
+{
+  "name": "Stream Probe",
+  "version": "1.2.0",
+  "description": "Plays each channel for a few seconds through Dispatcharr's own proxy, one at a time, and records resolution, codec, frame rate and bitrate on the stream that served it. Connection limits are respected, so a busy account is skipped, never kicked. Report-only.",
+  "author": "funkasaur",
+  "help_url": "https://github.com/funkasaur/dispatcharr-stream-probe",
+  "license": "MIT",
+  "repo_url": "https://github.com/funkasaur/dispatcharr-stream-probe",
+  "manifest_version": 2,
+  "min_dispatcharr_version": "v0.34.0",
+  "capabilities": [
+    "background_tasks",
+    "proxy_internals",
+    "subprocess",
+    "outbound_network",
+    "filesystem_write"
+  ],
+  "fields": [
+    {
+      "id": "xc_username",
+      "label": "Probe user (Dispatcharr username)",
+      "type": "string",
+      "default": "",
+      "help_text": "A dedicated non-admin user, so its traffic shows separately in usage counts."
+    },
+    {
+      "id": "xc_password",
+      "label": "Probe user's XC password",
+      "type": "string",
+      "input_type": "password",
+      "default": ""
+    },
+    {
+      "id": "include_groups",
+      "label": "Only these channel groups (comma-separated, exact names)",
+      "type": "string",
+      "default": "",
+      "help_text": "Empty = every group except the excluded ones."
+    },
+    {
+      "id": "exclude_groups",
+      "label": "Skip these channel groups (comma-separated, exact names)",
+      "type": "string",
+      "default": "",
+      "help_text": "Event-slot groups are empty most of the day; probing them says nothing."
+    },
+    {
+      "id": "max_channels",
+      "label": "Channels per run (max)",
+      "type": "number",
+      "default": 150
+    },
+    {
+      "id": "recheck_days",
+      "label": "Re-check a working channel after (days)",
+      "type": "number",
+      "default": 7,
+      "help_text": "Never-checked channels go first, then the oldest. Failed ones are retried on the next run."
+    },
+    {
+      "id": "sample_seconds",
+      "label": "Seconds of video to sample",
+      "type": "number",
+      "default": 8
+    },
+    {
+      "id": "connect_timeout",
+      "label": "Give up on a channel after (seconds without video)",
+      "type": "number",
+      "default": 30
+    },
+    {
+      "id": "pause_seconds",
+      "label": "Pause between channels (seconds)",
+      "type": "number",
+      "default": 3
+    },
+    {
+      "id": "keep_free",
+      "label": "Leave this many provider connections free for viewers",
+      "type": "number",
+      "default": 1,
+      "help_text": "Before each channel the probe counts free connections on the provider login(s) behind its first stream's M3U account, including other M3U accounts that use the same login; at or below this number the channel is logged as busy and retried next run."
+    },
+    {
+      "id": "start_time",
+      "label": "Nightly start (HH:MM, server time zone)",
+      "type": "string",
+      "default": "03:30"
+    },
+    {
+      "id": "window_minutes",
+      "label": "Stop starting new channels after (minutes)",
+      "type": "number",
+      "default": 150
+    },
+    {
+      "id": "schedule_enabled",
+      "label": "Run nightly",
+      "type": "boolean",
+      "default": false
+    },
+    {
+      "id": "proxy_base",
+      "label": "Dispatcharr address seen from inside the container",
+      "type": "string",
+      "default": "http://127.0.0.1:9191",
+      "help_text": "Where the probe opens /live/... URLs. The default fits the standard image (uWSGI on port 9191)."
+    },
+    {
+      "id": "info_notify",
+      "type": "info",
+      "label": "Alerts",
+      "description": "After a scheduled run that finds newly dead channels, one summary goes to Telegram and/or email. Channels that were already dead on the previous check are counted, not listed again."
+    },
+    {
+      "id": "alert_exclude_groups",
+      "label": "Probe but never alert on these groups (comma-separated, exact names)",
+      "type": "string",
+      "default": "",
+      "help_text": "For large optional groups where dead channels are expected. They still show in Report."
+    },
+    {
+      "id": "server_label",
+      "label": "Server label",
+      "type": "string",
+      "default": "",
+      "help_text": "Name used in alerts. Empty = hostname."
+    },
+    {
+      "id": "telegram_bot_token",
+      "label": "Telegram bot token",
+      "type": "string",
+      "input_type": "password",
+      "default": ""
+    },
+    {
+      "id": "telegram_chat_id",
+      "label": "Telegram chat id",
+      "type": "string",
+      "default": ""
+    },
+    {
+      "id": "notify_email",
+      "label": "Email to (comma-separated)",
+      "type": "string",
+      "default": ""
+    },
+    {
+      "id": "smtp_host",
+      "label": "SMTP host",
+      "type": "string",
+      "default": ""
+    },
+    {
+      "id": "smtp_port",
+      "label": "SMTP port",
+      "type": "number",
+      "default": 587
+    },
+    {
+      "id": "smtp_security",
+      "label": "SMTP security",
+      "type": "select",
+      "default": "starttls",
+      "options": [
+        {
+          "value": "starttls",
+          "label": "STARTTLS"
+        },
+        {
+          "value": "ssl",
+          "label": "SSL/TLS"
+        },
+        {
+          "value": "none",
+          "label": "None"
+        }
+      ]
+    },
+    {
+      "id": "smtp_username",
+      "label": "SMTP username",
+      "type": "string",
+      "default": ""
+    },
+    {
+      "id": "smtp_password",
+      "label": "SMTP password",
+      "type": "string",
+      "input_type": "password",
+      "default": ""
+    }
+  ],
+  "actions": [
+    {
+      "id": "probe_now",
+      "label": "Probe now",
+      "description": "Start a run now in the background (uses the limits above; params: limit, group, channel_ids). Watch progress with Status.",
+      "button_label": "Start",
+      "button_color": "blue"
+    },
+    {
+      "id": "stop",
+      "label": "Stop",
+      "description": "Stop the running probe after the current channel.",
+      "button_label": "Stop",
+      "button_color": "red"
+    },
+    {
+      "id": "status",
+      "label": "Status",
+      "description": "Current or last run, schedule.",
+      "button_label": "Status"
+    },
+    {
+      "id": "report",
+      "label": "Report",
+      "description": "Dead/busy channels and the quality of everything probed.",
+      "button_label": "Show"
+    },
+    {
+      "id": "dead_list",
+      "label": "Dead list (JSON)",
+      "description": "Channels whose last check failed, with how many checks in a row failed, for scripts.",
+      "button_label": "Get JSON"
+    },
+    {
+      "id": "apply_schedule",
+      "label": "Apply schedule",
+      "description": "Create, update or switch off the nightly run.",
+      "button_label": "Apply"
+    },
+    {
+      "id": "test_alert",
+      "label": "Send test alert",
+      "description": "Send a test message to the configured Telegram chat and email.",
+      "button_label": "Test"
+    }
+  ]
+}
