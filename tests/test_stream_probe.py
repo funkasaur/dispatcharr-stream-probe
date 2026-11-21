@@ -109,7 +109,7 @@ class StreamProbeLogic(unittest.TestCase):
 
     def test_manifest_v2(self):
         p = sp.Plugin
-        self.assertEqual((p.manifest_version, p.version), (2, "1.2.1"))
+        self.assertEqual((p.manifest_version, p.version), (2, "1.2.2"))
         self.assertTrue({"background_tasks", "subprocess", "outbound_network", "proxy_internals"} <= set(p.capabilities))
         self.assertIn("proxy_base", [f["id"] for f in p.fields])
 
@@ -133,7 +133,7 @@ class PluginStorage(unittest.TestCase):
         result = sp.Plugin().run("report", {}, {"data_dir": str(self.data_dir)})
         self.assertIn("1 channels", result["message"])
         self.assertEqual(sp._data_dir(), str(self.data_dir))
-        self.assertEqual(sp.Plugin.version, "1.2.1")
+        self.assertEqual(sp.Plugin.version, "1.2.2")
         self.assertNotIn("filesystem_write", sp.Plugin.capabilities)
 
     def test_scheduled_path_uses_plugin_manager(self):
@@ -192,7 +192,7 @@ class PluginStorage(unittest.TestCase):
 
     def test_missing_legacy_directory_is_ok(self):
         self.assertEqual(sp._data_dir(), str(self.data_dir))
-        self.assertEqual(list(self.data_dir.iterdir()), [])
+        self.assertEqual([p for p in self.data_dir.iterdir() if p.name != ".migration.lock"], [])
 
     def test_ffprobe_sample_uses_plugin_storage_and_is_removed_on_error(self):
         chunk = (bytes([0x47, 0x01, 0, 0]) + bytes(184)) * 50
@@ -211,7 +211,7 @@ class PluginStorage(unittest.TestCase):
             result = sp.probe_channel({"xc_username": "user", "xc_password": "pass"}, (1, 1, "A", "", "uuid", 1))
         self.assertEqual(result["result"], "no_video")
         self.assertIn("test ffprobe error", result["note"])
-        self.assertEqual(list(self.data_dir.iterdir()), [])
+        self.assertEqual([p for p in self.data_dir.iterdir() if p.name != ".migration.lock"], [])
 
 
 if __name__ == "__main__":

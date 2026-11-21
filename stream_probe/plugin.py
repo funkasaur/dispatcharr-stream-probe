@@ -122,9 +122,10 @@ def _migrate_state(data_dir):
 
     os.makedirs(data_dir, exist_ok=True)
     # Actions and scheduled checks may start in different processes.
-    dir_fd = os.open(data_dir, os.O_RDONLY)
+    # A lock file opened with the plugin-local open keeps the migration inside plugin storage.
+    lock = open(os.path.join(data_dir, ".migration.lock"), "a", encoding="utf-8")
     try:
-        fcntl.flock(dir_fd, fcntl.LOCK_EX)
+        fcntl.flock(lock, fcntl.LOCK_EX)
         if os.path.exists(complete):
             return
         interrupted = os.path.exists(pending)
@@ -152,7 +153,7 @@ def _migrate_state(data_dir):
                 LOGGER.info("Migrated legacy plugin state: %s", dest)
         os.replace(pending, complete)
     finally:
-        os.close(dir_fd)
+        lock.close()
 
 
 def _data_dir():
@@ -737,7 +738,7 @@ def _status():
 
 class Plugin:
     name = "Stream Probe"
-    version = "1.2.1"
+    version = "1.2.2"
     description = ("Plays each channel for a few seconds through Dispatcharr's own proxy, one at a time, and records "
                    "resolution, codec, frame rate and bitrate on the stream that served it. Connection limits are "
                    "respected, so a busy account is skipped, never kicked. Report-only.")
